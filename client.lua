@@ -45,16 +45,16 @@ plyState:set('canUseWeapons', false, false)
 
 local function canOpenInventory()
     if not PlayerData.loaded then
-        return shared.info('cannot open inventory', '(is not loaded)')
+        return shared.info('cannot open inventory', '(player inventory has not loaded)')
     end
 
     if IsPauseMenuActive() then return end
 
-    if invBusy or invOpen == nil or (currentWeapon and currentWeapon.timer ~= 0) then
+    if invBusy or invOpen == nil or (currentWeapon?.timer or 0) > 0 then
         return shared.info('cannot open inventory', '(is busy)')
     end
 
-    if PlayerData.dead or IsPedFatallyInjured(playerPed) then
+    if exports['refine-ambulance']:BodyCheck(cache.ped) then
         return shared.info('cannot open inventory', '(fatal injury)')
     end
 
@@ -68,8 +68,7 @@ end
 ---@param ped number
 ---@return boolean
 local function canOpenTarget(ped)
-	return IsPedFatallyInjured(ped)
-	or IsEntityPlayingAnim(ped, 'dead', 'dead_a', 3)
+	return exports['refine-ambulance']:BodyCheck(ped)
 	or IsPedCuffed(ped)
 	or IsEntityPlayingAnim(ped, 'mp_arresting', 'idle', 3)
 	or IsEntityPlayingAnim(ped, 'missminuteman_1ig_2', 'handsup_base', 3)
@@ -155,153 +154,161 @@ function client.openInventory(inv, data)
 		return lib.notify({ id = 'inventory_right_access', type = 'error', description = locale('inventory_right_access') })
 	end
 
-	if canOpenInventory() then
-		TriggerEvent('ox_inventory:UpdatePlayerDamage')
-		local left, right
+	if not canOpenInventory() then
+        return lib.notify({ id = 'inventory_player_access', type = 'error', description = locale('inventory_player_access') })
+    end
+    local left, right, accessError
+	TriggerEvent('ox_inventory:UpdatePlayerDamage')
+    if inv == 'player' and data ~= cache.serverId then
+        local targetId, targetPed
+		
+        if not data then
+            targetId, targetPed = Utils.GetClosestPlayer()
+            data = targetId and GetPlayerServerId(targetId)
+        else
+            local serverId = type(data) == 'table' and data.id or data
 
-		if inv == 'player' and data ~= cache.serverId then
-			local targetId, targetPed
+            if serverId == cache.serverId then return end
 
-			if not data then
-				targetId, targetPed = Utils.GetClosestPlayer()
-				data = targetId and GetPlayerServerId(targetId)
-			else
-				local serverId = type(data) == 'table' and data.id or data
+            targetId = serverId and GetPlayerFromServerId(serverId)
+            targetPed = targetId and GetPlayerPed(targetId)
+        end
 
-				if serverId == cache.serverId then return end
+        local targetCoords = targetPed and GetEntityCoords(targetPed)
 
-				targetId = serverId and GetPlayerFromServerId(serverId)
-				targetPed = targetId and GetPlayerPed(targetId)
-			end
+        if not targetCoords or #(targetCoords - GetEntityCoords(playerPed)) > 1.8 or not (client.hasGroup(shared.police) or canOpenTarget(targetPed)) then
+            return lib.notify({ id = 'inventory_right_access', type = 'error', description = locale('inventory_right_access') })
+        end
+    end
 
-			local targetCoords = targetPed and GetEntityCoords(targetPed)
+    if inv == 'shop' and invOpen == false then
+        if cache.vehicle then
+            return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
+        end
 
-			if not targetCoords or #(targetCoords - GetEntityCoords(playerPed)) > 1.8 or not (client.hasGroup(shared.police) or canOpenTarget(targetPed)) then
-				return lib.notify({ id = 'inventory_right_access', type = 'error', description = locale('inventory_right_access') })
-			end
-		end
+        left, right, accessError = lib.callback.await('ox_inventory:openShop', 200, data)
+    elseif inv == 'crafting' then
+        if cache.vehicle then
+            return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
+        end
 
-		if inv == 'shop' and invOpen == false then
-			if cache.vehicle then
-				return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
-			end
+        left, right, accessError = lib.callback.await('ox_inventory:openCraftingBench', 200, data.id, data.index)
 
-			left, right = lib.callback.await('ox_inventory:openShop', 200, data)
-		elseif inv == 'crafting' then
-			if cache.vehicle then
-				return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
-			end
+        if left then
+            right = CraftingBenches[data.id]
 
-			left = lib.callback.await('ox_inventory:openCraftingBench', 200, data.id, data.index)
+            if not right?.items then return end
 
-			if left then
-				right = CraftingBenches[data.id]
+            local coords, distance
 
-				if not right?.items then return end
-
-				local coords, distance
-
-				if not right.zones and not right.points then
-					coords = GetEntityCoords(cache.ped)
-					distance = 2
-				else
-					coords = shared.target and right.zones and right.zones[data.index].coords or right.points and right.points[data.index]
-					distance = coords and shared.target and right.zones[data.index].distance or 2
-				end
-
-				right = {
-					type = 'crafting',
-					id = data.id,
-					label = right.label or locale('crafting_bench'),
-					index = data.index,
-					slots = right.slots,
-					items = right.items,
-					coords = coords,
-					distance = distance
-				}
-			end
-		elseif invOpen ~= nil then
-			if inv == 'policeevidence' then
-                if not data then
-                    local input = lib.inputDialog(locale('police_evidence'), {
-                        { label = locale('locker_number'), type = 'number', required = true, icon = 'calculator' }
-                    }) --[[@as number[]? ]]
-
-                    if not input then return end
-
-                    data = input[1]
-                end
-			end
-
-			left, right = lib.callback.await('ox_inventory:openInventory', false, inv, data)
-		end
-
-		if left then
-			if not cache.vehicle then
-				if inv == 'player' then
-					Utils.PlayAnim(0, 'mp_common', 'givetake1_a', 8.0, 1.0, 2000, 50, 0.0, 0, 0, 0)
-				elseif inv ~= 'trunk' then
-					Utils.PlayAnim(0, 'pickup_object', 'putdown_low', 5.0, 1.5, 1000, 48, 0.0, 0, 0, 0)
-				end
-			end
-
-			plyState.invOpen = true
-
-			SetInterval(client.interval, 100)
-			SetNuiFocus(true, true)
-			SetNuiFocusKeepInput(true)
-			closeTrunk()
-
-			if client.screenblur then TriggerScreenblurFadeIn(0) end
-
-			currentInventory = right or defaultInventory
-			left.items = PlayerData.inventory
-			left.groups = PlayerData.groups
-
-			SendNUIMessage({
-				action = 'setupInventory',
-				data = {
-					leftInventory = left,
-					rightInventory = currentInventory
-				}
-			})
-
-			if not currentInventory.coords and not inv == 'container' then
-				currentInventory.coords = GetEntityCoords(playerPed)
-			end
-
-            if inv == 'trunk' then
-                SetTimeout(200, function()
-                    ---@todo animation for vans?
-                    Utils.PlayAnim(0, 'anim@heists@prison_heiststation@cop_reactions', 'cop_b_idle', 3.0, 3.0, -1, 49, 0.0, 0, 0, 0)
-
-                    local entity = data.entity or NetworkGetEntityFromNetworkId(data.netid)
-                    currentInventory.entity = entity
-                    currentInventory.door = data.door
-
-                    if not currentInventory.door then
-                        local vehicleHash = GetEntityModel(entity)
-                        local vehicleClass = GetVehicleClass(entity)
-                        currentInventory.door = vehicleClass == 12 and { 2, 3 } or Vehicles.Storage[vehicleHash] and 4 or 5
-                    end
-
-                    while currentInventory?.entity == entity and invOpen and DoesEntityExist(entity) and Inventory.CanAccessTrunk(entity) do
-                        Wait(100)
-					end
-
-                    if invOpen then client.closeInventory() end
-                end)
+            if not right.zones and not right.points then
+                coords = GetEntityCoords(cache.ped)
+                distance = 2
+            else
+                coords = shared.target and right.zones and right.zones[data.index].coords or right.points and right.points[data.index]
+                distance = coords and shared.target and right.zones[data.index].distance or 2
             end
 
-			-- Stash exists (useful for custom stashes)
-			return true
-		else
-			-- Stash does not exist
-			if left == false then return false end
-			if invOpen == false then lib.notify({ id = 'inventory_right_access', type = 'error', description = locale('inventory_right_access') }) end
-			if invOpen then client.closeInventory() end
-		end
-	else lib.notify({ id = 'inventory_player_access', type = 'error', description = locale('inventory_player_access') }) end
+            right = {
+                type = 'crafting',
+                id = data.id,
+                label = right.label or locale('crafting_bench'),
+                index = data.index,
+                slots = right.slots,
+                items = right.items,
+                coords = coords,
+                distance = distance
+            }
+        end
+    elseif invOpen ~= nil then
+        if inv == 'policeevidence' then
+            if not data then
+                local input = lib.inputDialog(locale('police_evidence'), {
+                    { label = locale('locker_number'), type = 'number', required = true, icon = 'calculator' }
+                }) --[[@as number[]? ]]
+
+                if not input then return end
+
+                data = input[1]
+            end
+        end
+
+        left, right, accessError = lib.callback.await('ox_inventory:openInventory', false, inv, data)
+    end
+
+    if accessError then
+        return lib.notify({ id = accessError, type = 'error', description = locale(accessError) })
+    end
+
+    -- Stash does not exist
+    if not left then
+        if left == false then return false end
+
+        if invOpen == false then
+            return lib.notify({ id = 'inventory_right_access', type = 'error', description = locale('inventory_right_access') })
+        end
+
+        if invOpen then return client.closeInventory() end
+    end
+
+
+    if not cache.vehicle then
+        if inv == 'player' then
+            Utils.PlayAnim(0, 'mp_common', 'givetake1_a', 8.0, 1.0, 2000, 50, 0.0, 0, 0, 0)
+        elseif inv ~= 'trunk' then
+            Utils.PlayAnim(0, 'pickup_object', 'putdown_low', 5.0, 1.5, 1000, 48, 0.0, 0, 0, 0)
+        end
+    end
+
+    plyState.invOpen = true
+
+    SetInterval(client.interval, 100)
+    SetNuiFocus(true, true)
+    SetNuiFocusKeepInput(true)
+    closeTrunk()
+
+    if client.screenblur then TriggerScreenblurFadeIn(0) end
+
+    currentInventory = right or defaultInventory
+    left.items = PlayerData.inventory
+    left.groups = PlayerData.groups
+
+    SendNUIMessage({
+        action = 'setupInventory',
+        data = {
+            leftInventory = left,
+            rightInventory = currentInventory
+        }
+    })
+
+    if not currentInventory.coords and not inv == 'container' then
+        currentInventory.coords = GetEntityCoords(playerPed)
+    end
+
+    if inv == 'trunk' then
+        SetTimeout(200, function()
+            ---@todo animation for vans?
+            Utils.PlayAnim(0, 'anim@heists@prison_heiststation@cop_reactions', 'cop_b_idle', 3.0, 3.0, -1, 49, 0.0, 0, 0, 0)
+
+            local entity = data.entity or NetworkGetEntityFromNetworkId(data.netid)
+            currentInventory.entity = entity
+            currentInventory.door = data.door
+
+            if not currentInventory.door then
+                local vehicleHash = GetEntityModel(entity)
+                local vehicleClass = GetVehicleClass(entity)
+                currentInventory.door = vehicleClass == 12 and { 2, 3 } or Vehicles.Storage[vehicleHash] and 4 or 5
+            end
+
+            while currentInventory?.entity == entity and invOpen and DoesEntityExist(entity) and Inventory.CanAccessTrunk(entity) do
+                Wait(100)
+            end
+
+            if invOpen then client.closeInventory() end
+        end)
+    end
+
+    return true
 end
 
 RegisterNetEvent('ox_inventory:openInventory', client.openInventory)
@@ -338,7 +345,7 @@ local Items = require 'modules.items.client'
 local usingItem = false
 
 ---@param data { name: string, label: string, count: number, slot: number, metadata: table<string, any>, weight: number }
-lib.callback.register('ox_inventory:usingItem', function(data)
+lib.callback.register('ox_inventory:usingItem', function(data, noAnim)
 	local item = Items[data.name]
 
 	if item and usingItem then
@@ -369,7 +376,7 @@ lib.callback.register('ox_inventory:usingItem', function(data)
 			item.disable.combat = true
 		end
 
-		local success = (not item.usetime or lib.progressBar({
+		local success = (not item.usetime or noAnim or lib.progressBar({
 			duration = item.usetime,
 			label = item.label or locale('using', data.metadata.label or data.label),
 			useWhileDead = item.useWhileDead,
@@ -377,7 +384,7 @@ lib.callback.register('ox_inventory:usingItem', function(data)
 			disable = item.disable,
 			anim = item.anim or item.scenario,
 			prop = item.prop --[[@as ProgressProps]]
-		})) and not PlayerData.dead
+		})) and not exports['refine-ambulance']:BodyCheck(cache.ped)
 
 		if success then
 			if item.notification then
@@ -401,7 +408,7 @@ local function canUseItem(isAmmo)
 	return not usingItem
     and (not isAmmo or currentWeapon)
 	and PlayerData.loaded
-	and not PlayerData.dead
+	and not exports['refine-ambulance']:BodyCheck(cache.ped)
 	and not invBusy
 	and not lib.progressActive()
 	and not IsPedRagdoll(ped)
@@ -410,10 +417,17 @@ end
 
 ---@param data table
 ---@param cb fun(response: SlotWithItem | false)?
-local function useItem(data, cb)
+---@param noAnim? boolean
+local function useItem(data, cb, noAnim)
 	local slotData, result = PlayerData.inventory[data.slot]
 
-	if not slotData or not canUseItem(data.ammo and true) then return end
+	if not slotData or not canUseItem(data.ammo and true) then
+        if currentWeapon then
+            return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
+        end
+
+        return
+    end
 
 	if currentWeapon?.timer and currentWeapon.timer > 100 then return end
 
@@ -421,7 +435,7 @@ local function useItem(data, cb)
 
     usingItem = true
     ---@type boolean?
-    result = lib.callback.await('ox_inventory:useItem', 200, data.name, data.slot, slotData.metadata)
+    result = lib.callback.await('ox_inventory:useItem', 200, data.name, data.slot, slotData.metadata, noAnim)
 
 	if result and cb then
 		local success, response = pcall(cb, result and slotData)
@@ -448,7 +462,7 @@ exports('useItem', useItem)
 
 ---@param slot number
 ---@return boolean?
-local function useSlot(slot)
+local function useSlot(slot, noAnim)
 	local item = PlayerData.inventory[slot]
 	if not item then return end
 
@@ -515,11 +529,11 @@ local function useSlot(slot)
 			useItem(data, function(result)
 				if result then
                     local sleep
-					currentWeapon, sleep = Weapon.Equip(item, data)
+					currentWeapon, sleep = Weapon.Equip(item, data, noAnim)
 
 					if sleep then Wait(sleep) end
 				end
-			end)
+			end, noAnim)
 		elseif currentWeapon then
 			if data.ammo then
 				if EnableWeaponWheel or currentWeapon.metadata.durability <= 0 then return end
@@ -585,14 +599,25 @@ local function useSlot(slot)
 
 					if newAmmo == currentAmmo then return end
 
-					if cache.vehicle then
-						SetAmmoInClip(playerPed, currentWeapon.hash, newAmmo)
+                    AddAmmoToPed(playerPed, currentWeapon.hash, addAmmo)
 
+					if cache.vehicle then
 						if cache.seat > -1 or IsVehicleStopped(cache.vehicle) then
 							TaskReloadWeapon(playerPed, true)
-						end
+                        else
+                            -- This is a hacky solution for forcing ammo to properly load into the
+                            -- weapon clip while driving; without it, ammo will be added but won't
+                            -- load until the player stops doing anything. i.e. if you keep shooting,
+                            -- the weapon will not reload until the clip empties.
+                            -- And yes - for some reason RefillAmmoInstantly needs to run in a loop.
+                            lib.waitFor(function()
+                                RefillAmmoInstantly(playerPed)
+
+                                local _, ammo = GetAmmoInClip(playerPed, currentWeapon.hash)
+                                return ammo == newAmmo or nil
+                            end)
+                        end
 					else
-						AddAmmoToPed(playerPed, currentWeapon.hash, addAmmo)
 						Wait(100)
 						MakePedReload(playerPed)
 
@@ -645,11 +670,13 @@ local function useSlot(slot)
 				lib.notify({ id = 'component_invalid', type = 'error', description = locale('component_invalid', label) })
 			elseif data.allowArmed then
 				useItem(data)
+            else
+                return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
 			end
 		elseif not data.ammo and not data.component then
 			useItem(data)
 		end
-	end
+    end
 end
 exports('useSlot', useSlot)
 
@@ -679,13 +706,13 @@ local Shops = require 'modules.shops.client'
 
 ---@todo remove or replace when the bridge module gets restructured
 function OnPlayerData(key, val)
-	if key ~= 'groups' and key ~= 'ped' and key ~= 'dead' then return end
+	if key ~= 'groups' and key ~= 'ped' and exports['refine-ambulance']:BodyCheck(cache.ped) then return end
 
 	if key == 'groups' then
 		Inventory.Stashes()
 		Inventory.Evidence()
 		Shops.refreshShops()
-	elseif key == 'dead' and val then
+	elseif exports['refine-ambulance']:BodyCheck(cache.ped) and val then
 		currentWeapon = Weapon.Disarm(currentWeapon)
 		client.closeInventory()
 	end
@@ -794,7 +821,7 @@ local function registerCommands()
 		description = locale('reload_weapon'),
 		defaultKey = 'r',
 		onPressed = function(self)
-			if not currentWeapon or not canUseItem(true) then return end
+			if not currentWeapon or EnableWeaponWheel or not canUseItem(true) then return end
 
 			if currentWeapon.ammo then
 				if currentWeapon.metadata.durability > 0 then
@@ -826,7 +853,7 @@ local function registerCommands()
 			description = locale('use_hotbar', i),
 			defaultKey = tostring(i),
 			onPressed = function()
-				if invOpen or IsNuiFocused() or not invHotkeys then return end
+				if invOpen or EnableWeaponWheel or not invHotkeys or IsNuiFocused() then return end
 				useSlot(i)
 			end
 		})
@@ -1106,12 +1133,12 @@ local function setStateBagHandler(stateId)
 			end
 		end
 	end)
-
+	--[[
 	AddStateBagChangeHandler('dead', stateId, function(_, _, value)
 		Utils.WeaponWheel()
 		PlayerData.dead = value
 	end)
-
+	]]--
 	AddStateBagChangeHandler('invHotkeys', stateId, function(_, _, value)
 		invHotkeys = value
 	end)
@@ -1226,7 +1253,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 		createDrop(dropId, data)
 	end
 
-	local hasTextUi = false
+	local hasTextUi
 	local uiOptions = { icon = 'fa-id-card' }
 
 	---@param point CPoint
@@ -1236,7 +1263,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 
 		if point.isClosest and point.currentDistance < 1.2 then
 			if not hasTextUi then
-				hasTextUi = true
+				hasTextUi = nil
 				lib.showTextUI(point.message, uiOptions)
 			end
 
@@ -1251,7 +1278,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 					end
 				end, point.invId)
 			end
-		elseif hasTextUi then
+		elseif hasTextUi == point then
 			hasTextUi = false
 			lib.hideTextUI()
 		end
@@ -1334,7 +1361,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 		end
 
 		if client.parachute and GetPedParachuteState(playerPed) ~= -1 then
-			Utils.DeleteEntity(client.parachute)
+			Utils.DeleteEntity(client.parachute[1])
 			client.parachute = false
 		end
 
@@ -1400,7 +1427,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 				DisableControlAction(0, 36, true)
 			end
 
-			if usingItem or invBusy == true or IsPedCuffed(playerPed) then
+			if usingItem or invOpen or IsPedCuffed(playerPed) then
 				DisablePlayerFiring(playerId, true)
 			end
 
@@ -1729,7 +1756,10 @@ RegisterNUICallback('swapItems', function(data, cb)
     swapActive = true
 
 	if data.toType == 'newdrop' then
-		if cache.vehicle or IsPedFalling(playerPed) then return cb(false) end
+		if cache.vehicle or IsPedFalling(playerPed) then
+			swapActive = false
+			return cb(false)
+		end
 
 		local coords = GetEntityCoords(playerPed)
 
@@ -1848,63 +1878,77 @@ lib.callback.register('ox_inventory:getVehicleData', function(netid)
 end)
 
 bodypercent = { 
-	['HEAD'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['NECK'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['UPPER_BODY'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['LOWER_BODY'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['LARM'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['RARM'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['LHAND'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['RHAND'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['LLEG'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['RLEG'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['LFOOT'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['RFOOT'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
-	['SPINE'] = { percent = 0, bullets = 0, severity = false, broken = false, bleeding = false },
+	['HEAD'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['NECK'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['UPPER_BODY'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['LOWER_BODY'] = { percent = 0, bullets = 0, severiNonety = 'None', broken = false, bleeding = false },
+	['LARM'] = { percent = 0, bullets = 0, severity = '', broken = false, bleeding = false },
+	['RARM'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['LHAND'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['RHAND'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['LLEG'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['RLEG'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['LFOOT'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['RFOOT'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
+	['SPINE'] = { percent = 0, bullets = 0, severity = 'None', broken = false, bleeding = false },
 }
 
 RegisterNetEvent('ox_inventory:UpdatePlayerDamage', function(BodyParts)
-	local GetPlayerDamage = BodyParts or exports.BC_Wounding:GetPlayerDamage()
+	local GetPlayerDamage = BodyParts or exports['on-ambulance']:GetDamage()
 	for k, v in pairs(GetPlayerDamage) do
-		if v.severity and not bodypercent[k].severity then
-			bodypercent[k].percent = bodypercent[k].percent + 40
-			bodypercent[k].severity = true
+		if v.severity == 0 then
+			bodypercent[k].percent = 0
+			bodypercent[k].severity = 'None'
+		end
+		if v.severity == 1 then
+			bodypercent[k].percent = 10
+			bodypercent[k].severity = 'Irritated'
 		end
 
-		if not v.severity and bodypercent[k].severity then
-			bodypercent[k].severity = false
-			bodypercent[k].percent = bodypercent[k].percent - 40
+		if v.severity == 2 then
+			bodypercent[k].percent = 20
+			bodypercent[k].severity = 'Painful'
 		end
 
-		if v.broken and not bodypercent[k].broken then
+		if v.severity == 3 then
+			bodypercent[k].percent = 30
+			bodypercent[k].severity = 'Agonizing'
+		end
+
+		if v.severity == 4 then
+			bodypercent[k].percent = 40
+			bodypercent[k].severity = 'Excruciating'
+		end
+
+		if v.isDamaged == true and not bodypercent[k].broken then
 			bodypercent[k].percent = bodypercent[k].percent + 20
 			bodypercent[k].broken = true
 		end
 
-		if not v.broken and bodypercent[k].broken then
+		if v.isDamaged == false and bodypercent[k].broken then
 			bodypercent[k].broken = false
 			bodypercent[k].percent = bodypercent[k].percent - 20
 		end
 
-		if v.bleeding and not bodypercent[k].bleeding then
+		if (v.severity == 4 or v.severity == 3 or v.severity == 2) and not bodypercent[k].bleeding then
 			bodypercent[k].percent = bodypercent[k].percent + 10
 			bodypercent[k].bleeding = true
 		end
 
-		if not v.bleeding and bodypercent[k].bleeding then
+		if (v.severity == 1 or v.severity == 0) and bodypercent[k].bleeding then
 			bodypercent[k].bleeding = false
 			bodypercent[k].percent = bodypercent[k].percent - 10
 		end
 
-		if v.bullet and v.bullet ~= bodypercent[k].bullets then
-			if v.bullet > bodypercent[k].bullets then
-				local bulletCalc = math.floor(v.bullet * 10)
+		if v.hit and v.hit ~= bodypercent[k].bullets then
+			if v.hit > bodypercent[k].bullets then
+				local bulletCalc = math.floor(v.hit * 10)
 				bodypercent[k].percent = bodypercent[k].percent + bulletCalc
-				bodypercent[k].bullets = v.bullet
+				bodypercent[k].bullets = v.hit
 			else
-				local bulletCalc = math.floor(v.bullet * 10)
+				local bulletCalc = math.floor(v.hit * 10)
 				bodypercent[k].percent = bodypercent[k].percent - bulletCalc
-				bodypercent[k].bullets = v.bullet
+				bodypercent[k].bullets = v.hit
 			end
 		end
 
